@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# uv
+uv.lock
+
+# Database (local data, not for deployment)
+volleyball.db
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+desktop.ini
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
