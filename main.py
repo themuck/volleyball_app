@@ -1,250 +1,158 @@
 import streamlit as st
-import pandas as pd
-import sqlite3
-from datetime import datetime
+import itertools
+from tinydb import TinyDB, Query
 
-# Seiteneinstellungen
-st.set_page_config(page_title="Heidbrede Volleyball Zähler", page_icon="🏐", layout="centered")
+st.set_page_config(
+    page_title="🏐 Volleyball Ticker",
+    page_icon="🏐",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
 
-# --- DATENBANK EINRICHTEN ---
-DB_FILE = "volleyball.db"
+DB_PATH = "volleyball.json"
+db       = TinyDB(DB_PATH)
+t_setup  = db.table("setup")
+t_spiele = db.table("spiele")
+Spiel    = Query()
 
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    # Tabelle für Spieler
-    c.execute('''CREATE TABLE IF NOT EXISTS spieler 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, team TEXT, name TEXT)''')
-    # Tabelle für Spiele-Historie
-    c.execute('''CREATE TABLE IF NOT EXISTS historie 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, zeitpunkt TEXT, team_a TEXT, team_b TEXT, saetze_a INTEGER, saetze_b INTEGER)''')
-    conn.commit()
-    conn.close()
+st.markdown("""
+<style>
+  .block-container { padding: 1rem 0.5rem; max-width: 480px; margin: auto; }
+  h1 { text-align: center; font-size: 1.8rem !important; }
+  .score-display { font-size: 3.5rem; font-weight: 900; text-align: center; line-height: 1; margin: 0; }
+  div[data-testid="stButton"] button { height: 3.5rem; font-size: 1.4rem; font-weight: bold; border-radius: 10px; width: 100%; }
+  .trow { background:#1e2a3a; border-radius:10px; padding:.6rem .9rem; margin-bottom:.4rem; border-left:4px solid #4a9eff; overflow:hidden; }
+  .trow .tname { font-size:1rem; font-weight:700; color:#fff; }
+  .trow .tpkt  { font-size:1.2rem; font-weight:800; color:#4a9eff; float:right; }
+</style>
+""", unsafe_allow_html=True)
 
-init_db()
+def get_setup():
+    rows = t_setup.all()
+    return rows[0] if rows else {}
 
-# --- FUNKTIONEN FÜR DIE DATENBANK ---
-def spieler_hinzufuegen(team, name):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO spieler (team, name) VALUES (?, ?)", (team, name))
-    conn.commit()
-    conn.close()
+def save_setup(data):
+    t_setup.truncate()
+    t_setup.insert(data)
 
-def hole_spieler(team):
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT name FROM spieler WHERE team = ?", conn, params=(team,))
-    conn.close()
-    return df["name"].tolist()
+def get_spiele():
+    return sorted(t_spiele.all(), key=lambda s: s["nr"])
 
-def loesche_spieler(team, name):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM spieler WHERE team = ? AND name = ?", (team, name))
-    conn.commit()
-    conn.close()
+def save_spiel(spiel):
+    t_spiele.upsert(spiel, Spiel.nr == spiel["nr"])
 
-def spiel_speichern(team_a, team_b, sätze_a, sätze_b):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    zeit = datetime.now().strftime("%Y-%m-%d %H:%M")
-    c.execute("INSERT INTO historie (zeitpunkt, team_a, team_b, saetze_a, saetze_b) VALUES (?, ?, ?, ?, ?)",
-              (zeit, team_a, team_b, sätze_a, sätze_b))
-    conn.commit()
-    conn.close()
+def reset_db():
+    t_setup.truncate()
+    t_spiele.truncate()
 
-def hole_historie():
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT zeitpunkt AS 'Zeitpunkt', team_a AS 'Team A', team_b AS 'Team B', saetze_a AS 'Sätze A', saetze_b AS 'Sätze B' FROM historie", conn)
-    conn.close()
-    return df
+def erstelle_spielplan(teams):
+    return [
+        {"nr": nr, "heim": a, "gast": b,
+         "punkte_heim": 0, "punkte_gast": 0,
+         "gespielt": False, "sieger": None}
+        for nr, (a, b) in enumerate(itertools.combinations(teams, 2), 1)
+    ]
 
-# --- SESSION STATE FÜR DIE APP ---
-if 'score_a' not in st.session_state: st.session_state.score_a = 0
-if 'score_b' not in st.session_state: st.session_state.score_b = 0
-if 'sets_a' not in st.session_state: st.session_state.sets_a = 0
-if 'sets_b' not in st.session_state: st.session_state.sets_b = 0
-if 'swapped' not in st.session_state: st.session_state.swapped = False
-if 'match_over' not in st.session_state: st.session_state.match_over = False
-# Merkt sich, ob die Seiten zu Beginn des aktuellen Satzes getauscht waren
-# (damit der automatische Wechsel im 5. Satz bei 8 Punkten nur einmal passiert)
-if 'fifth_set_switched' not in st.session_state: st.session_state.fifth_set_switched = False
+def check_gewonnen(ph, pg, ziel):
+    return max(ph, pg) >= ziel and abs(ph - pg) >= 2
 
-# --- UI: SEITENLEISTE (EINSTELLUNGEN & DATENBANK) ---
-st.sidebar.title("⚙️ Verwaltung")
+st.title("🏐 Volleyball-Live-Ticker")
+setup = get_setup()
 
-# Teamnamen festlegen
-team_a_name = st.sidebar.text_input("Name Team A", value="Team A")
-team_b_name = st.sidebar.text_input("Name Team B", value="Team B")
-
-st.sidebar.divider()
-st.sidebar.subheader("👤 Spieler hinzufügen")
-neuer_spieler = st.sidebar.text_input("Name des Spielers")
-ziel_team = st.sidebar.selectbox("Zu welchem Team?", [team_a_name, team_b_name])
-
-if st.sidebar.button("Spieler speichern"):
-    if neuer_spieler:
-        spieler_hinzufuegen(ziel_team, neuer_spieler)
-        st.sidebar.success(f"{neuer_spieler} zu {ziel_team} hinzugefügt!")
-        st.rerun()
-
-# --- HAUPTBEREICH: VOLLEYBALL ZÄHLER ---
-st.title("🏐 heidbrede Volleyball Zähler")
-
-# Ist es der 5. Satz? (Sätze 0-basiert gezählt, 5. Satz = insgesamt 4 Sätze gespielt)
-def ist_fuenfter_satz():
-    return st.session_state.sets_a == 2 and st.session_state.sets_b == 2
-
-# Hilfsfunktion für Satz-Gewinn
-def check_set_win():
-    target = 15 if ist_fuenfter_satz() else 25
-    set_gewonnen = False
-
-    if st.session_state.score_a >= target and (st.session_state.score_a - st.session_state.score_b) >= 2:
-        st.session_state.sets_a += 1
-        st.session_state.score_a, st.session_state.score_b = 0, 0
-        set_gewonnen = True
-        st.toast(f"🎉 {team_a_name} gewinnt den Satz!")
-    elif st.session_state.score_b >= target and (st.session_state.score_b - st.session_state.score_a) >= 2:
-        st.session_state.sets_b += 1
-        st.session_state.score_a, st.session_state.score_b = 0, 0
-        set_gewonnen = True
-        st.toast(f"🎉 {team_b_name} gewinnt den Satz!")
-
-    if set_gewonnen:
-        # Match gewonnen? (Best of 5 → erste Mannschaft mit 3 Sätzen)
-        if st.session_state.sets_a >= 3:
-            st.session_state.match_over = True
-            st.toast(f"🏆 {team_a_name} gewinnt das Spiel!")
-        elif st.session_state.sets_b >= 3:
-            st.session_state.match_over = True
-            st.toast(f"🏆 {team_b_name} gewinnt das Spiel!")
+if not setup:
+    st.header("Turnier erstellen")
+    zielpunkte = st.radio("Bis wie viele Punkte?", options=[15, 25], format_func=lambda x: f"{x} Punkte")
+    teams_text = st.text_area("Mannschaften (eine pro Zeile)", "Team A\nTeam B")
+    if st.button("Turnier starten"):
+        teams = [t.strip() for t in teams_text.split("\n") if t.strip()]
+        if len(teams) < 2:
+            st.error("Bitte mindestens 2 Teams eintragen!")
         else:
-            # Automatischer Seitenwechsel nach jedem Satz
-            st.session_state.swapped = not st.session_state.swapped
-            st.session_state.fifth_set_switched = False
+            save_setup({"zielpunkte": zielpunkte, "teams": teams})
+            for s in erstelle_spielplan(teams):
+                save_spiel(s)
+            st.rerun()
 
-# Automatischer Seitenwechsel im 5. Satz bei 8 Punkten
-def check_fifth_set_switch():
-    if ist_fuenfter_satz() and not st.session_state.fifth_set_switched:
-        total_points = st.session_state.score_a + st.session_state.score_b
-        # Wechsel wenn ein Team 8 Punkte erreicht (= führendes Team hat 8)
-        if st.session_state.score_a >= 8 or st.session_state.score_b >= 8:
-            st.session_state.swapped = not st.session_state.swapped
-            st.session_state.fifth_set_switched = True
-            st.toast("🔄 Automatischer Seitenwechsel im 5. Satz!")
-
-# Sätze-Anzeige (respektiert Seitenwechsel)
-if not st.session_state.swapped:
-    saetze_links, saetze_rechts = st.session_state.sets_a, st.session_state.sets_b
-    name_links, name_rechts = team_a_name, team_b_name
 else:
-    saetze_links, saetze_rechts = st.session_state.sets_b, st.session_state.sets_a
-    name_links, name_rechts = team_b_name, team_a_name
+    tabs = st.tabs(["📅 Spielplan", "🏆 Tabelle", "⚙️ Optionen"])
+    ziel_pkt = setup["zielpunkte"]
 
-st.markdown(f"### 🏆 Sätze: {name_links} `{saetze_links}` : `{saetze_rechts}` {name_rechts}")
+    with tabs[0]:
+        st.header("Spielplan")
+        st.caption("📱 Handy: bitte Querformat verwenden")
+        spiele = get_spiele()
 
-# Match-Gewinner anzeigen
-if st.session_state.match_over:
-    if st.session_state.sets_a >= 3:
-        st.success(f"🏆 **{team_a_name}** hat das Spiel gewonnen! ({st.session_state.sets_a}:{st.session_state.sets_b})")
-    else:
-        st.success(f"🏆 **{team_b_name}** hat das Spiel gewonnen! ({st.session_state.sets_b}:{st.session_state.sets_a})")
+        for s in spiele:
+            status = "✅" if s["gespielt"] else "⏳"
+            with st.expander(f"{status} Spiel {s['nr']}: {s['heim']} vs. {s['gast']}"):
+                if not s["gespielt"]:
+                    match_vorbei = check_gewonnen(s["punkte_heim"], s["punkte_gast"], ziel_pkt)
+                    st.markdown(f"<p style='text-align:center;color:#888;'>Ziel: {ziel_pkt} Punkte</p>", unsafe_allow_html=True)
 
-st.divider()
+                    # Score
+                    col_h, col_sep, col_g = st.columns([5, 1, 5])
+                    with col_h:
+                        st.markdown(f"<p style='text-align:center;font-weight:bold;'>{s['heim']}</p>", unsafe_allow_html=True)
+                        st.markdown(f"<p class='score-display'>{s['punkte_heim']}</p>", unsafe_allow_html=True)
+                    with col_sep:
+                        st.markdown("<p style='text-align:center;font-size:1.5rem;margin-top:2rem;'>:</p>", unsafe_allow_html=True)
+                    with col_g:
+                        st.markdown(f"<p style='text-align:center;font-weight:bold;'>{s['gast']}</p>", unsafe_allow_html=True)
+                        st.markdown(f"<p class='score-display'>{s['punkte_gast']}</p>", unsafe_allow_html=True)
 
-# Teams anzeigen (mit Seitenwechsel)
-col1, col2 = st.columns(2)
-if not st.session_state.swapped:
-    t1, t2 = team_a_name, team_b_name
-    s1, s2 = st.session_state.score_a, st.session_state.score_b
-    id1, id2 = "a", "b"
-else:
-    t1, t2 = team_b_name, team_a_name
-    s1, s2 = st.session_state.score_b, st.session_state.score_a
-    id1, id2 = "b", "a"
+                    # Buttons – flache 4er-Zeile, nur +1 / -1
+                    if not match_vorbei:
+                        b1, b2, b3, b4 = st.columns(4)
+                        if b1.button("-1", key=f"mh_{s['nr']}", disabled=s["punkte_heim"] == 0, use_container_width=True):
+                            s["punkte_heim"] -= 1; save_spiel(s); st.rerun()
+                        if b2.button("+1", key=f"ph_{s['nr']}", use_container_width=True):
+                            s["punkte_heim"] += 1; save_spiel(s); st.rerun()
+                        if b3.button("+1", key=f"pg_{s['nr']}", use_container_width=True):
+                            s["punkte_gast"] += 1; save_spiel(s); st.rerun()
+                        if b4.button("-1", key=f"mg_{s['nr']}", disabled=s["punkte_gast"] == 0, use_container_width=True):
+                            s["punkte_gast"] -= 1; save_spiel(s); st.rerun()
 
-# Punkte-Buttons nur aktiv wenn Spiel nicht vorbei
-buttons_disabled = st.session_state.match_over
+                        # Team-Zuordnung unter den Buttons
+                        l, r = st.columns(2)
+                        l.caption(f"⬅ {s['heim']}")
+                        r.caption(f"{s['gast']} ➡")
 
-# Spalte Links
-with col1:
-    st.header(t1)
-    # Spieler aus der DB unter dem Teamnamen anzeigen
-    spieler_liste_1 = hole_spieler(t1)
-    if spieler_liste_1:
-        st.caption("👥 Aufstellung: " + ", ".join(spieler_liste_1))
-    
-    st.metric(label="Punkte", value=s1)
-    if st.button(f"➕ Punkt {t1}", key="p_l", disabled=buttons_disabled):
-        if id1 == "a": st.session_state.score_a += 1
-        else: st.session_state.score_b += 1
-        check_fifth_set_switch()
-        check_set_win()
-        st.rerun()
-    if st.button(f"➖ Abzug {t1}", key="m_l", disabled=buttons_disabled):
-        if id1 == "a" and st.session_state.score_a > 0: st.session_state.score_a -= 1
-        elif id1 == "b" and st.session_state.score_b > 0: st.session_state.score_b -= 1
-        st.rerun()
+                    if match_vorbei:
+                        sieger = s["heim"] if s["punkte_heim"] > s["punkte_gast"] else s["gast"]
+                        st.success(f"🎉 Sieger: **{sieger}**")
+                        c1, c2 = st.columns([3, 1])
+                        if c1.button("💾 Ergebnis eintragen", type="primary", key=f"fin_{s['nr']}"):
+                            s["gespielt"] = True; s["sieger"] = sieger
+                            save_spiel(s); st.rerun()
+                        if c2.button("↩️", key=f"undo_{s['nr']}"):
+                            if s["punkte_heim"] > s["punkte_gast"]: s["punkte_heim"] -= 1
+                            else: s["punkte_gast"] -= 1
+                            save_spiel(s); st.rerun()
+                else:
+                    st.success(f"🏆 **{s['sieger']}** gewinnt ({s['punkte_heim']} : {s['punkte_gast']})")
 
-# Spalte Rechts
-with col2:
-    st.header(t2)
-    spieler_liste_2 = hole_spieler(t2)
-    if spieler_liste_2:
-        st.caption("👥 Aufstellung: " + ", ".join(spieler_liste_2))
-        
-    st.metric(label="Punkte", value=s2)
-    if st.button(f"➕ Punkt {t2}", key="p_r", disabled=buttons_disabled):
-        if id2 == "a": st.session_state.score_a += 1
-        else: st.session_state.score_b += 1
-        check_fifth_set_switch()
-        check_set_win()
-        st.rerun()
-    if st.button(f"➖ Abzug {t2}", key="m_r", disabled=buttons_disabled):
-        if id2 == "a" and st.session_state.score_a > 0: st.session_state.score_a -= 1
-        elif id2 == "b" and st.session_state.score_b > 0: st.session_state.score_b -= 1
-        st.rerun()
+    with tabs[1]:
+        st.header("Rangliste")
+        spiele = get_spiele()
+        tabelle = {t: {"punkte": 0, "siege": 0, "balle": 0} for t in setup["teams"]}
+        for s in spiele:
+            if s["gespielt"]:
+                tabelle[s["heim"]]["balle"] += s["punkte_heim"]
+                tabelle[s["gast"]]["balle"]  += s["punkte_gast"]
+                if s["sieger"] == s["heim"]:
+                    tabelle[s["heim"]]["punkte"] += 3; tabelle[s["heim"]]["siege"] += 1
+                else:
+                    tabelle[s["gast"]]["punkte"]  += 3; tabelle[s["gast"]]["siege"]  += 1
+        sortiert = sorted(tabelle.items(), key=lambda x: (x[1]["punkte"], x[1]["siege"], x[1]["balle"]), reverse=True)
+        for rank, (team, d) in enumerate(sortiert, 1):
+            st.markdown(
+                f'<div class="trow"><span class="tname">{rank}. {team} ({d["siege"]} Siege)</span>'
+                f'<span class="tpkt">{d["punkte"]} Pkt</span></div>',
+                unsafe_allow_html=True
+            )
 
-st.divider()
-
-# Steuerung
-c1, c2, c3 = st.columns(3)
-with c1:
-    if st.button("🔄 Seitenwechsel", width="stretch"):
-        st.session_state.swapped = not st.session_state.swapped
-        st.rerun()
-with c2:
-    if st.button("💾 Spiel speichern", width="stretch"):
-        spiel_speichern(team_a_name, team_b_name, st.session_state.sets_a, st.session_state.sets_b)
-        st.success("Spiel in Datenbank gespeichert!")
-with c3:
-    if st.button("❌ Reset", type="primary", width="stretch"):
-        st.session_state.score_a = 0
-        st.session_state.score_b = 0
-        st.session_state.sets_a = 0
-        st.session_state.sets_b = 0
-        st.session_state.swapped = False
-        st.session_state.match_over = False
-        st.session_state.fifth_set_switched = False
-        st.rerun()
-
-# --- HISTORIE AUS DER DB ANZEIGEN ---
-st.divider()
-st.subheader("📊 Spielhistorie (aus der Datenbank)")
-df_h = hole_historie()
-if not df_h.empty:
-    st.dataframe(df_h, width="stretch")
-else:
-    st.info("Noch keine Spiele in der Datenbank.")
-
-# --- BONUS: SPIELER LÖSCHEN OPTION ---
-st.sidebar.divider()
-st.sidebar.subheader("🗑️ Spieler löschen")
-team_auswahl = st.sidebar.selectbox("Team wählen", [team_a_name, team_b_name], key="del_team")
-spieler_auswahl = st.sidebar.selectbox("Spieler wählen", hole_spieler(team_auswahl) if team_auswahl else [])
-if st.sidebar.button("Spieler entfernen"):
-    if spieler_auswahl:
-        loesche_spieler(team_auswahl, spieler_auswahl)
-        st.sidebar.warning(f"{spieler_auswahl} wurde gelöscht.")
-        st.rerun()
+    with tabs[2]:
+        st.header("Optionen")
+        if st.button("🔄 Turnier komplett löschen", type="primary"):
+            reset_db()
+            st.rerun()
