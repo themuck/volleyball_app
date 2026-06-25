@@ -14,7 +14,7 @@ env/
 uv.lock
 
 # Database (local data, not for deployment)
-volleyball.db
+volleyball.json
 
 # IDE
 .vscode/
